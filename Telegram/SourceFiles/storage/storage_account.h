@@ -76,6 +76,7 @@ public:
 	}
 
 	[[nodiscard]] QString tempDirectory() const;
+	[[nodiscard]] QString supportModePath() const;
 
 	[[nodiscard]] MTP::AuthKeyPtr peekLegacyLocalKey() const {
 		return _localKey;
@@ -173,6 +174,12 @@ public:
 	void enforceModernStorageIdBots();
 	[[nodiscard]] Webview::StorageId resolveStorageIdBots();
 	[[nodiscard]] Webview::StorageId resolveStorageIdOther();
+
+	[[nodiscard]] QImage readRoundPlaceholder();
+	void writeRoundPlaceholder(const QImage &placeholder);
+
+	[[nodiscard]] QByteArray readInlineBotsDownloads();
+	void writeInlineBotsDownloads(const QByteArray &bytes);
 
 	[[nodiscard]] bool encrypt(
 		const void *src,
@@ -302,6 +309,8 @@ private:
 	FileKey _featuredCustomEmojiKey = 0;
 	FileKey _archivedCustomEmojiKey = 0;
 	FileKey _searchSuggestionsKey = 0;
+	FileKey _roundPlaceholderKey = 0;
+	FileKey _inlineBotsDownloadsKey = 0;
 
 	qint64 _cacheTotalSizeLimit = 0;
 	qint64 _cacheBigFileTotalSizeLimit = 0;
@@ -313,6 +322,7 @@ private:
 	bool _readingUserSettings = false;
 	bool _recentHashtagsAndBotsWereRead = false;
 	bool _searchSuggestionsRead = false;
+	bool _inlineBotsDownloadsRead = false;
 
 	Webview::StorageId _webviewStorageIdBots;
 	Webview::StorageId _webviewStorageIdOther;
@@ -324,6 +334,8 @@ private:
 	base::Timer _writeSearchSuggestionsTimer;
 	bool _mapChanged = false;
 	bool _locationsChanged = false;
+
+	QImage _roundPlaceholder;
 
 };
 

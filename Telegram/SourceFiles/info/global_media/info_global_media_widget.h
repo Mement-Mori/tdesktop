@@ -8,17 +8,21 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "info/info_content_widget.h"
+#include "info/media/info_media_widget.h"
 
-class ChannelData;
-struct PeerListState;
+namespace Storage {
+enum class SharedMediaType : signed char;
+} // namespace Storage
 
-namespace Info::SimilarChannels {
+namespace Info::GlobalMedia {
 
 class InnerWidget;
 
 class Memento final : public ContentMemento {
 public:
-	explicit Memento(not_null<ChannelData*> channel);
+	Memento(not_null<Controller*> controller);
+	Memento(not_null<UserData*> self, Storage::SharedMediaType type);
+	~Memento();
 
 	object_ptr<ContentWidget> createWidget(
 		QWidget *parent,
@@ -27,26 +31,21 @@ public:
 
 	Section section() const override;
 
-	[[nodiscard]] not_null<ChannelData*> channel() const;
-
-	void setListState(std::unique_ptr<PeerListState> state);
-	std::unique_ptr<PeerListState> listState();
-
-	~Memento();
+	[[nodiscard]] Media::Memento &media() {
+		return _media;
+	}
+	[[nodiscard]] const Media::Memento &media() const {
+		return _media;
+	}
 
 private:
-	std::unique_ptr<PeerListState> _listState;
+	Media::Memento _media;
 
 };
 
 class Widget final : public ContentWidget {
 public:
-	Widget(
-		QWidget *parent,
-		not_null<Controller*> controller,
-		not_null<ChannelData*> channel);
-
-	[[nodiscard]] not_null<ChannelData*> channel() const;
+	Widget(QWidget *parent, not_null<Controller*> controller);
 
 	bool showInternal(
 		not_null<ContentMemento*> memento) override;
@@ -54,6 +53,11 @@ public:
 	void setInternalState(
 		const QRect &geometry,
 		not_null<Memento*> memento);
+
+	rpl::producer<SelectedItems> selectedListValue() const override;
+	void selectionAction(SelectionAction action) override;
+
+	void fillTopBarMenu(const Ui::Menu::MenuCallback &addAction) override;
 
 	rpl::producer<QString> title() override;
 
@@ -67,4 +71,8 @@ private:
 
 };
 
-} // namespace Info::SimilarChannels
+[[nodiscard]] std::shared_ptr<Info::Memento> Make(
+	not_null<UserData*> self,
+	Storage::SharedMediaType type);
+
+} // namespace Info::GlobalMedia

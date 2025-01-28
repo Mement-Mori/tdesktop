@@ -25,6 +25,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/boxes/boost_box.h" // Ui::StartFireworks.
 #include "ui/layers/generic_box.h"
 #include "ui/text/format_values.h"
+#include "ui/text/text_utilities.h"
+#include "ui/toast/toast.h"
 #include "window/window_controller.h"
 #include "window/window_session_controller.h"
 
@@ -59,7 +61,24 @@ void ProcessCreditsPayment(
 			const auto done = [=](std::optional<QString> error) {
 				const auto onstack = maybeReturnToBot;
 				if (error) {
-					show->showToast(*error);
+					if (*error == u"STARGIFT_USAGE_LIMITED"_q) {
+						if (form->starGiftLimitedCount) {
+							show->showToast({
+								.title = tr::lng_gift_sold_out_title(
+									tr::now),
+								.text = tr::lng_gift_sold_out_text(
+									tr::now,
+									lt_count_decimal,
+									form->starGiftLimitedCount,
+									Ui::Text::RichLangValue),
+							});
+						} else {
+							show->showToast(
+								tr::lng_gift_sold_out_title(tr::now));
+						}
+					} else {
+						show->showToast(*error);
+					}
 					if (onstack) {
 						onstack(CheckoutResult::Failed);
 					}
@@ -75,14 +94,14 @@ void ProcessCreditsPayment(
 			Ui::SendCreditsBox,
 			form,
 			[=] {
-			*unsuccessful = false;
-			if (const auto widget = fireworks.data()) {
-				Ui::StartFireworks(widget);
-			}
-			if (const auto onstack = maybeReturnToBot) {
-				onstack(CheckoutResult::Paid);
-			}
-		}));
+				*unsuccessful = false;
+				if (const auto widget = fireworks.data()) {
+					Ui::StartFireworks(widget);
+				}
+				if (const auto onstack = maybeReturnToBot) {
+					onstack(CheckoutResult::Paid);
+				}
+			}));
 		box->boxClosing() | rpl::start_with_next([=] {
 			crl::on_main([=] {
 				if (*unsuccessful) {
@@ -93,11 +112,14 @@ void ProcessCreditsPayment(
 			});
 		}, box->lifetime());
 	};
-	Settings::MaybeRequestBalanceIncrease(
-		show,
-		form->invoice.credits,
-		Settings::SmallBalanceBot{ .botId = form->botId },
-		done);
+	using namespace Settings;
+	const auto starGift = std::get_if<InvoiceStarGift>(&form->id.value);
+	auto source = !starGift
+		? SmallBalanceSource(SmallBalanceBot{ .botId = form->botId })
+		: SmallBalanceSource(SmallBalanceStarGift{
+			.recipientId = starGift->recipient->id,
+		});
+	MaybeRequestBalanceIncrease(show, form->invoice.credits, source, done);
 }
 
 void ProcessCreditsReceipt(
@@ -107,7 +129,7 @@ void ProcessCreditsReceipt(
 	const auto entry = Data::CreditsHistoryEntry{
 		.id = receipt->id,
 		.title = receipt->title,
-		.description = receipt->description,
+		.description = { receipt->description },
 		.date = base::unixtime::parse(receipt->date),
 		.photoId = receipt->photo ? receipt->photo->id : 0,
 		.credits = receipt->credits,
@@ -135,6 +157,7 @@ Fn<void(NonPanelPaymentForm)> ProcessNonPanelPaymentFormFactory(
 				controller->content().get(),
 				form,
 				maybeReturnToBot);
+			controller->window().activate();
 		}, [&](const CreditsReceiptPtr &receipt) {
 			ProcessCreditsReceipt(controller, receipt, maybeReturnToBot);
 		}, [](RealFormPresentedNotification) {});
