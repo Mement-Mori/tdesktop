@@ -23,6 +23,7 @@ struct TextWithContext {
 struct PaidReactionTop {
 	QString name;
 	std::shared_ptr<DynamicImage> photo;
+	uint64 barePeerId = 0;
 	int count = 0;
 	Fn<void()> click;
 	bool my = false;
@@ -36,8 +37,8 @@ struct PaidReactionBoxArgs {
 
 	QString channel;
 	Fn<rpl::producer<TextWithContext>(rpl::producer<int> amount)> submit;
-	rpl::producer<uint64> balanceValue;
-	Fn<void(int, bool)> send;
+	rpl::producer<StarsAmount> balanceValue;
+	Fn<void(int, uint64)> send;
 };
 
 void PaidReactionsBox(

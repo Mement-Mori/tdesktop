@@ -11,6 +11,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "settings/settings_advanced.h"
 #include "settings/settings_privacy_security.h"
 #include "settings/settings_experimental.h"
+#include "settings/settings_shortcuts.h"
 #include "boxes/abstract_box.h"
 #include "boxes/peers/edit_peer_color_box.h"
 #include "boxes/connection_box.h"
@@ -896,24 +897,10 @@ void SetupMessages(
 		Quick::React,
 		tr::lng_settings_chat_quick_action_react(tr::now));
 
-	class EmptyButton final : public Ui::IconButton {
-	public:
-		EmptyButton(not_null<Ui::RpWidget*> p, const style::IconButton &st)
-		: Ui::IconButton(p, st)
-		, _rippleAreaPosition(st.rippleAreaPosition) {
-		}
-	protected:
-		void paintEvent(QPaintEvent *e) override {
-			auto p = QPainter(this);
-
-			paintRipple(p, _rippleAreaPosition, nullptr);
-		}
-	private:
-		const QPoint _rippleAreaPosition;
-	};
-	const auto buttonRight = Ui::CreateChild<EmptyButton>(
+	const auto buttonRight = Ui::CreateSimpleCircleButton(
 		inner,
-		st::stickersRemove);
+		st::stickersRemove.ripple);
+	buttonRight->resize(st::stickersRemove.width, st::stickersRemove.height);
 	const auto toggleButtonRight = [=](bool value) {
 		buttonRight->setAttribute(Qt::WA_TransparentForMouseEvents, !value);
 	};
@@ -1017,13 +1004,23 @@ void SetupMessages(
 		Core::App().saveSettingsDelayed();
 	}, inner->lifetime());
 
-	Ui::AddSkip(inner, st::settingsCheckboxesSkip);
+	Ui::AddSkip(inner);
 }
 
 void SetupArchive(
 		not_null<Window::SessionController*> controller,
-		not_null<Ui::VerticalLayout*> container) {
+		not_null<Ui::VerticalLayout*> container,
+		Fn<void(Type)> showOther) {
 	Ui::AddSkip(container);
+
+	AddButtonWithIcon(
+		container,
+		tr::lng_settings_shortcuts(),
+		st::settingsButton,
+		{ &st::menuIconShortcut }
+	)->addClickHandler([=] {
+		showOther(Shortcuts::Id());
+	});
 
 	PreloadArchiveSettings(&controller->session());
 	AddButtonWithIcon(
@@ -1072,9 +1069,7 @@ void SetupLocalStorage(
 		tr::lng_settings_manage_local_storage(),
 		st::settingsButton,
 		{ &st::menuIconStorage }
-	)->addClickHandler([=] {
-		LocalStorageBox::Show(&controller->session());
-	});
+	)->addClickHandler([=] { LocalStorageBox::Show(controller); });
 }
 
 void SetupDataStorage(
@@ -1812,7 +1807,7 @@ void Chat::setupContent(not_null<Window::SessionController*> controller) {
 	SetupMessages(controller, content);
 	Ui::AddDivider(content);
 	SetupSensitiveContent(controller, content, std::move(updateOnTick));
-	SetupArchive(controller, content);
+	SetupArchive(controller, content, showOtherMethod());
 
 	Ui::ResizeFitChild(this, content);
 }

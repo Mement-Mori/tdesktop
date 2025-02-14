@@ -109,6 +109,11 @@ public:
 		TrayOnly = 1,
 		WindowOnly = 2,
 	};
+	enum class CloseBehavior {
+		Quit = 0,
+		CloseToTaskbar = 1,
+		RunInBackground = 2,
+	};
 
 	static constexpr auto kDefaultVolume = 0.9;
 
@@ -219,6 +224,9 @@ public:
 
 	[[nodiscard]] bool nativeNotifications() const;
 	void setNativeNotifications(bool value);
+
+	[[nodiscard]] bool skipToastsInFocus() const;
+	void setSkipToastsInFocus(bool value);
 
 	[[nodiscard]] int notificationsCount() const {
 		return _notificationsCount;
@@ -625,6 +633,13 @@ public:
 		return _floatPlayerCorner;
 	}
 
+	[[nodiscard]] bool recordVideoMessages() const {
+		return _recordVideoMessages;
+	}
+	void setRecordVideoMessages(bool value) {
+		_recordVideoMessages = value;
+	}
+
 	void updateDialogsWidthRatio(float64 ratio, bool nochat);
 	[[nodiscard]] float64 dialogsWidthRatio(bool nochat) const;
 
@@ -735,17 +750,11 @@ public:
 		_hiddenGroupCallTooltips |= value;
 	}
 
-	void setCloseToTaskbar(bool value) {
-		_closeToTaskbar = value;
+	void setCloseBehavior(CloseBehavior value) {
+		_closeBehavior = value;
 	}
-	[[nodiscard]] bool closeToTaskbar() const {
-		return _closeToTaskbar.current();
-	}
-	[[nodiscard]] rpl::producer<bool> closeToTaskbarValue() const {
-		return _closeToTaskbar.value();
-	}
-	[[nodiscard]] rpl::producer<bool> closeToTaskbarChanges() const {
-		return _closeToTaskbar.changes();
+	[[nodiscard]] CloseBehavior closeBehavior() const {
+		return _closeBehavior;
 	}
 	void setTrayIconMonochrome(bool value) {
 		_trayIconMonochrome = value;
@@ -915,6 +924,17 @@ public:
 		_tonsiteStorageToken = value;
 	}
 
+	[[nodiscard]] int ivZoom() const;
+	[[nodiscard]] rpl::producer<int> ivZoomValue() const;
+	void setIvZoom(int value);
+
+	[[nodiscard]] bool chatFiltersHorizontal() const;
+	[[nodiscard]] rpl::producer<bool> chatFiltersHorizontalChanges() const;
+	void setChatFiltersHorizontal(bool value);
+
+	[[nodiscard]] Media::VideoQuality videoQuality() const;
+	void setVideoQuality(Media::VideoQuality quality);
+
 	[[nodiscard]] static bool ThirdColumnByDefault();
 	[[nodiscard]] static float64 DefaultDialogsWidthRatio();
 
@@ -954,6 +974,7 @@ private:
 	bool _flashBounceNotify = true;
 	NotifyView _notifyView = NotifyView::ShowPreview;
 	std::optional<bool> _nativeNotifications;
+	bool _skipToastsInFocus = false;
 	int _notificationsCount = 3;
 	ScreenCorner _notificationsCorner = ScreenCorner::BottomRight;
 	bool _includeMutedCounter = true;
@@ -1014,13 +1035,13 @@ private:
 	bool _notifyFromAll = true;
 	rpl::variable<bool> _nativeWindowFrame = false;
 	rpl::variable<std::optional<bool>> _systemDarkMode = std::nullopt;
-	rpl::variable<bool> _systemDarkModeEnabled = false;
+	rpl::variable<bool> _systemDarkModeEnabled = true;
 	rpl::variable<WindowTitleContent> _windowTitleContent;
 	WindowPosition _windowPosition; // per-window
 	bool _disableOpenGL = false;
 	rpl::variable<WorkMode> _workMode = WorkMode::WindowAndTray;
 	base::flags<Calls::Group::StickedTooltip> _hiddenGroupCallTooltips;
-	rpl::variable<bool> _closeToTaskbar = false;
+	CloseBehavior _closeBehavior = CloseBehavior::Quit;
 	rpl::variable<bool> _trayIconMonochrome = true;
 	rpl::variable<QString> _customDeviceModel;
 	rpl::variable<Media::RepeatMode> _playerRepeatMode;
@@ -1050,6 +1071,9 @@ private:
 	bool _systemUnlockEnabled = false;
 	std::optional<bool> _weatherInCelsius;
 	QByteArray _tonsiteStorageToken;
+	rpl::variable<int> _ivZoom = 100;
+	Media::VideoQuality _videoQuality;
+	rpl::variable<bool> _chatFiltersHorizontal = false;
 
 	bool _tabbedReplacedWithInfo = false; // per-window
 	rpl::event_stream<bool> _tabbedReplacedWithInfoValue; // per-window
@@ -1059,6 +1083,8 @@ private:
 	bool _rememberedSoundNotifyFromTray = false;
 	bool _rememberedFlashBounceNotifyFromTray = false;
 	bool _dialogsWidthSetToZeroWithoutChat = false;
+
+	bool _recordVideoMessages = false;
 
 	QByteArray _photoEditorBrush;
 

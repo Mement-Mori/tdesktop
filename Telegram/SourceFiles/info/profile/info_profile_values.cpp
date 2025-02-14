@@ -166,13 +166,21 @@ rpl::producer<TextWithEntities> UsernameValue(
 	}) | Ui::Text::ToWithEntities();
 }
 
-QString UsernameUrl(not_null<PeerData*> peer, const QString &username) {
-	return peer->isUsernameEditable(username)
-		? peer->session().createInternalLinkFull(username)
-		: (u"internal:collectible_username/"_q
-			+ username
-			+ "@"
-			+ QString::number(peer->id.value));
+QString UsernameUrl(
+		not_null<PeerData*> peer,
+		const QString &username,
+		bool link) {
+	const auto type = !peer->isUsernameEditable(username)
+		? u"collectible_username"_q
+		: link
+		? u"username_link"_q
+		: u"username_regular"_q;
+	return u"internal:"_q
+		+ type
+		+ u"/"_q
+		+ username
+		+ "@"
+		+ QString::number(peer->id.value);
 }
 
 rpl::producer<std::vector<TextWithEntities>> UsernamesValue(
@@ -243,7 +251,7 @@ rpl::producer<LinkWithUrl> LinkValue(not_null<PeerData*> peer, bool primary) {
 				: peer->session().createInternalLinkFull(username)),
 			.url = (username.isEmpty()
 				? QString()
-				: UsernameUrl(peer, username)),
+				: UsernameUrl(peer, username, true)),
 		};
 	});
 }
@@ -562,16 +570,16 @@ rpl::producer<int> CommonGroupsCountValue(not_null<UserData*> user) {
 	});
 }
 
-rpl::producer<int> SimilarChannelsCountValue(
-		not_null<ChannelData*> channel) {
-	const auto participants = &channel->session().api().chatParticipants();
-	participants->loadSimilarChannels(channel);
-	return rpl::single(channel) | rpl::then(
+rpl::producer<int> SimilarPeersCountValue(
+		not_null<PeerData*> peer) {
+	const auto participants = &peer->session().api().chatParticipants();
+	participants->loadSimilarPeers(peer);
+	return rpl::single(peer) | rpl::then(
 		participants->similarLoaded()
 	) | rpl::filter(
-		rpl::mappers::_1 == channel
+		rpl::mappers::_1 == peer
 	) | rpl::map([=] {
-		const auto &similar = participants->similar(channel);
+		const auto &similar = participants->similar(peer);
 		return int(similar.list.size()) + similar.more;
 	});
 }
@@ -587,12 +595,12 @@ rpl::producer<int> SavedSublistCountValue(
 	return sublist->fullCountValue();
 }
 
-rpl::producer<int> PeerGiftsCountValue(not_null<UserData*> user) {
-	return user->session().changes().peerFlagsValue(
-		user,
+rpl::producer<int> PeerGiftsCountValue(not_null<PeerData*> peer) {
+	return peer->session().changes().peerFlagsValue(
+		peer,
 		UpdateFlag::PeerGifts
 	) | rpl::map([=] {
-		return user->peerGiftsCount();
+		return peer->peerGiftsCount();
 	});
 }
 
@@ -668,9 +676,9 @@ rpl::producer<BadgeType> BadgeValue(not_null<PeerData*> peer) {
 	return rpl::single(BadgeType::None);
 }
 
-rpl::producer<DocumentId> EmojiStatusIdValue(not_null<PeerData*> peer) {
+rpl::producer<EmojiStatusId> EmojiStatusIdValue(not_null<PeerData*> peer) {
 	if (peer->isChat()) {
-		return rpl::single(DocumentId(0));
+		return rpl::single(EmojiStatusId());
 	}
 	return peer->session().changes().peerFlagsValue(
 		peer,

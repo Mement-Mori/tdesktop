@@ -31,7 +31,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/edit_privacy_box.h"
 #include "boxes/premium_preview_box.h"
 #include "boxes/sticker_set_box.h"
-#include "boxes/sessions_box.h"
 #include "boxes/star_gift_box.h"
 #include "boxes/language_box.h"
 #include "passport/passport_form_controller.h"
@@ -51,6 +50,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/window_peer_menu.h"
 #include "window/themes/window_theme_editor_box.h" // GenerateSlug.
 #include "payments/payments_checkout_process.h"
+#include "settings/settings_active_sessions.h"
 #include "settings/settings_credits.h"
 #include "settings/settings_credits_graphics.h"
 #include "settings/settings_information.h"
@@ -61,8 +61,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "settings/settings_privacy_security.h"
 #include "settings/settings_chat.h"
 #include "settings/settings_premium.h"
+#include "storage/storage_account.h"
 #include "mainwidget.h"
 #include "main/main_account.h"
+#include "main/main_app_config.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
 #include "main/main_session_settings.h"
@@ -173,6 +175,34 @@ void PersonalChannelController::rowClicked(not_null<PeerListRow*> row) {
 auto PersonalChannelController::chosen() const
 -> rpl::producer<not_null<ChannelData*>> {
 	return _chosen.events();
+}
+
+Window::SessionController *ApplyAccountIndex(
+		not_null<Window::SessionController*> controller,
+		int accountIndex) {
+	if (accountIndex <= 0) {
+		return nullptr;
+	}
+	const auto list = Core::App().domain().orderedAccounts();
+	if (accountIndex > int(list.size())) {
+		return nullptr;
+	}
+	const auto account = list[accountIndex - 1];
+	if (account == &controller->session().account()) {
+		return controller;
+	} else if (const auto window = Core::App().windowFor({ account })) {
+		if (&window->account() != account) {
+			Core::App().domain().maybeActivate(account);
+			if (&window->account() != account) {
+				return nullptr;
+			}
+		}
+		const auto session = window->sessionController();
+		if (session) {
+			return session;
+		}
+	}
+	return nullptr;
 }
 
 void SavePersonalChannel(
@@ -471,6 +501,20 @@ bool ResolveUsernameOrPhone(
 	const auto params = url_parse_params(
 		match->captured(1),
 		qthelp::UrlParamNameTransform::ToLower);
+
+	if (params.contains(u"acc"_q)) {
+		const auto switched = ApplyAccountIndex(
+			controller,
+			params.value(u"acc"_q).toInt());
+		if (switched) {
+			controller = switched;
+		} else {
+			controller->showToast(u"Could not activate account %1."_q.arg(
+				params.value(u"acc"_q)));
+			return false;
+		}
+	}
+
 	const auto domainParam = params.value(u"domain"_q);
 	const auto appnameParam = params.value(u"appname"_q);
 	const auto myContext = context.value<ClickHandlerContext>();
@@ -514,8 +558,19 @@ bool ResolveUsernameOrPhone(
 		? ResolveType::Profile
 		: ResolveType::Default;
 	auto startToken = params.value(u"start"_q);
+	auto referral = params.value(u"ref"_q);
 	if (!startToken.isEmpty()) {
 		resolveType = ResolveType::BotStart;
+		if (referral.isEmpty()) {
+			const auto appConfig = &controller->session().appConfig();
+			const auto &prefixes = appConfig->startRefPrefixes();
+			for (const auto &prefix : prefixes) {
+				if (startToken.startsWith(prefix)) {
+					referral = startToken.mid(prefix.size());
+					break;
+				}
+			}
+		}
 	} else if (params.contains(u"startgroup"_q)) {
 		resolveType = ResolveType::AddToGroup;
 		startToken = params.value(u"startgroup"_q);
@@ -544,6 +599,8 @@ bool ResolveUsernameOrPhone(
 	const auto threadParam = params.value(u"thread"_q);
 	const auto threadId = topicId ? topicId : threadParam.toInt();
 	const auto gameParam = params.value(u"game"_q);
+	const auto videot = params.value(u"t"_q);
+
 	if (!gameParam.isEmpty() && validDomain(gameParam)) {
 		startToken = gameParam;
 		resolveType = ResolveType::ShareGame;
@@ -560,6 +617,9 @@ bool ResolveUsernameOrPhone(
 		.phone = phone,
 		.messageId = post,
 		.storyId = storyId,
+		.videoTimestamp = (!videot.isEmpty()
+			? ParseVideoTimestamp(videot)
+			: std::optional<TimeId>()),
 		.text = params.value(u"text"_q),
 		.repliesInfo = commentId
 			? Window::RepliesByLinkInfo{
@@ -571,11 +631,13 @@ bool ResolveUsernameOrPhone(
 			}
 			: Window::RepliesByLinkInfo{ v::null },
 		.resolveType = resolveType,
+		.referral = referral,
 		.startToken = startToken,
 		.startAdminRights = adminRights,
 		.startAutoSubmit = myContext.botStartAutoSubmit,
 		.botAppName = (appname.isEmpty() ? postParam : appname),
 		.botAppForceConfirmation = myContext.mayShowConfirmation,
+		.botAppFullScreen = (params.value(u"mode"_q) == u"fullscreen"_q),
 		.attachBotUsername = params.value(u"attach"_q),
 		.attachBotToggleCommand = (params.contains(u"startattach"_q)
 			? params.value(u"startattach"_q)
@@ -721,8 +783,8 @@ bool OpenMediaTimestamp(
 	if (!controller) {
 		return false;
 	}
-	const auto time = match->captured(2).toInt();
-	if (time < 0) {
+	const auto position = match->captured(2).toInt();
+	if (position < 0) {
 		return false;
 	}
 	const auto base = match->captured(1);
@@ -735,7 +797,7 @@ bool OpenMediaTimestamp(
 		const auto session = &controller->session();
 		const auto document = session->data().document(documentId);
 		const auto context = session->data().message(itemId);
-		const auto timeMs = time * crl::time(1000);
+		const auto time = position * crl::time(1000);
 		if (document->isVideoFile()) {
 			controller->window().openInMediaView(Media::View::OpenRequest(
 				controller,
@@ -743,11 +805,9 @@ bool OpenMediaTimestamp(
 				context,
 				context ? context->topicRootId() : MsgId(0),
 				false,
-				timeMs));
+				time));
 		} else if (document->isSong() || document->isVoiceMessage()) {
-			session->settings().setMediaLastPlaybackPosition(
-				documentId,
-				timeMs);
+			session->local().setMediaLastPlaybackPosition(documentId, time);
 			Media::Player::instance()->play({ document, itemId });
 		}
 		return true;
@@ -785,9 +845,9 @@ bool CopyPeerId(
 		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	TextUtilities::SetClipboardText(TextForMimeData{ match->captured(1) });
+	TextUtilities::SetClipboardText({ match->captured(1) });
 	if (controller) {
-		controller->showToast(tr::lng_text_copied(tr::now));
+		controller->showToast(u"ID copied to clipboard."_q);
 	}
 	return true;
 }
@@ -926,6 +986,34 @@ bool ShowCollectibleUsername(
 	return true;
 }
 
+bool CopyUsernameLink(
+		Window::SessionController *controller,
+		const Match &match,
+		const QVariant &context) {
+	if (!controller) {
+		return false;
+	}
+	const auto username = match->captured(1);
+	TextUtilities::SetClipboardText({
+		controller->session().createInternalLinkFull(username)
+	});
+	controller->showToast(tr::lng_username_copied(tr::now));
+	return true;
+}
+
+bool CopyUsername(
+		Window::SessionController *controller,
+		const Match &match,
+		const QVariant &context) {
+	if (!controller) {
+		return false;
+	}
+	const auto username = match->captured(1);
+	TextUtilities::SetClipboardText({ '@' + username });
+	controller->showToast(tr::lng_username_text_copied(tr::now));
+	return true;
+}
+
 bool ShowStarsExamples(
 		Window::SessionController *controller,
 		const Match &match,
@@ -934,6 +1022,17 @@ bool ShowStarsExamples(
 		return false;
 	}
 	controller->show(Dialogs::StarsExamplesBox(controller));
+	return true;
+}
+
+bool ShowPopularAppsAbout(
+		Window::SessionController *controller,
+		const Match &match,
+		const QVariant &context) {
+	if (!controller) {
+		return false;
+	}
+	controller->show(Dialogs::PopularAppsAboutBox(controller));
 	return true;
 }
 
@@ -1249,6 +1348,21 @@ bool ResolveChatLink(
 	return true;
 }
 
+bool ResolveUniqueGift(
+		Window::SessionController *controller,
+		const Match &match,
+		const QVariant &context) {
+	if (!controller) {
+		return false;
+	}
+	const auto slug = match->captured(1);
+	if (slug.isEmpty()) {
+		return false;
+	}
+	ResolveAndShowUniqueGift(controller->uiShow(), slug);
+	return true;
+}
+
 } // namespace
 
 const std::vector<LocalUrlHandler> &LocalUrlHandlers() {
@@ -1342,6 +1456,10 @@ const std::vector<LocalUrlHandler> &LocalUrlHandlers() {
 			ResolveTopUp
 		},
 		{
+			u"^nft/?\\?slug=([a-zA-Z0-9\\.\\_\\-]+)(&|$)"_q,
+			ResolveUniqueGift
+		},
+		{
 			u"^([^\\?]+)(\\?|#|$)"_q,
 			HandleUnknown
 		},
@@ -1392,8 +1510,20 @@ const std::vector<LocalUrlHandler> &InternalUrlHandlers() {
 			ShowCollectibleUsername,
 		},
 		{
+			u"^username_link/([a-zA-Z0-9\\-\\_\\.]+)@([0-9]+)$"_q,
+			CopyUsernameLink,
+		},
+		{
+			u"^username_regular/([a-zA-Z0-9\\-\\_\\.]+)@([0-9]+)$"_q,
+			CopyUsername,
+		},
+		{
 			u"^stars_examples$"_q,
 			ShowStarsExamples,
+		},
+		{
+			u"^about_popular_apps$"_q,
+			ShowPopularAppsAbout,
 		},
 	};
 	return Result;
@@ -1478,6 +1608,9 @@ QString TryConvertUrlToLocal(QString url) {
 		} else if (const auto chatlinkMatch = regex_match(u"^m/([a-zA-Z0-9\\.\\_\\-]+)(\\?|$)"_q, query, matchOptions)) {
 			const auto slug = chatlinkMatch->captured(1);
 			return u"tg://message?slug="_q + slug;
+		} else if (const auto nftMatch = regex_match(u"^nft/([a-zA-Z0-9\\.\\_\\-]+)(\\?|$)"_q, query, matchOptions)) {
+			const auto slug = nftMatch->captured(1);
+			return u"tg://nft?slug="_q + slug;
 		} else if (const auto privateMatch = regex_match(u"^"
 			"c/(\\-?\\d+)"
 			"("
@@ -1569,6 +1702,63 @@ bool StartUrlRequiresActivate(const QString &url) {
 	return Core::App().passcodeLocked()
 		? true
 		: !InternalPassportLink(url);
+}
+
+void ResolveAndShowUniqueGift(
+		std::shared_ptr<ChatHelpers::Show> show,
+		const QString &slug,
+		::Settings::CreditsEntryBoxStyleOverrides st) {
+	struct Request {
+		base::weak_ptr<Main::Session> weak;
+		QString slug;
+		mtpRequestId id = 0;
+	};
+	static auto request = Request();
+
+	const auto session = &show->session();
+	if (request.weak.get() == session && request.slug == slug) {
+		return;
+	} else if (const auto strong = request.weak.get()) {
+		strong->api().request(request.id).cancel();
+	}
+	request.weak = session;
+	request.slug = slug;
+	const auto clear = [=] {
+		if (request.weak.get() == session && request.slug == slug) {
+			request = {};
+		}
+	};
+	request.id = session->api().request(
+		MTPpayments_GetUniqueStarGift(MTP_string(slug))
+	).done([=](const MTPpayments_UniqueStarGift &result) {
+		clear();
+
+		const auto &data = result.data();
+		session->data().processUsers(data.vusers());
+		if (const auto gift = Api::FromTL(session, data.vgift())) {
+			using namespace ::Settings;
+			show->show(Box(GlobalStarGiftBox, show, *gift, st));
+		}
+	}).fail([=](const MTP::Error &error) {
+		clear();
+		show->showToast(u"Error: "_q + error.type());
+	}).send();
+}
+
+void ResolveAndShowUniqueGift(
+		std::shared_ptr<ChatHelpers::Show> show,
+		const QString &slug) {
+	ResolveAndShowUniqueGift(std::move(show), slug, {});
+}
+
+TimeId ParseVideoTimestamp(QStringView value) {
+	const auto kExp = u"^(?:(\\d+)h)?(?:(\\d+)m)?(?:(\\d+)s)?$"_q;
+	const auto m = QRegularExpression(kExp).match(value);
+	return m.hasMatch()
+		? (m.capturedView(1).toInt() * 3600
+			+ m.capturedView(2).toInt() * 60
+			+ m.capturedView(3).toInt())
+		: value.toInt();
 }
 
 } // namespace Core

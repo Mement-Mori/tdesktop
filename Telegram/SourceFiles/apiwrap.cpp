@@ -142,6 +142,16 @@ void ShowChannelsLimitBox(not_null<PeerData*> peer) {
 		action.replaceMediaOf);
 }
 
+[[nodiscard]] QString FormatVideoTimestamp(TimeId seconds) {
+	const auto minutes = seconds / 60;
+	const auto hours = minutes / 60;
+	return hours
+		? u"%1h%2m%3s"_q.arg(hours).arg(minutes % 60).arg(seconds % 60)
+		: minutes
+		? u"%1m%2s"_q.arg(minutes).arg(seconds % 60)
+		: QString::number(seconds);
+}
+
 } // namespace
 
 ApiWrap::ApiWrap(not_null<Main::Session*> session)
@@ -559,6 +569,14 @@ void ApiWrap::sendMessageFail(
 			: tr::lng_error_noforwards_group(tr::now), kJoinErrorDuration);
 	} else if (error == u"PREMIUM_ACCOUNT_REQUIRED"_q) {
 		Settings::ShowPremium(&session(), "premium_stickers");
+	} else if (error == u"SCHEDULE_TOO_MUCH"_q) {
+		auto &scheduled = _session->scheduledMessages();
+		if (const auto item = scheduled.lookupItem(peer->id, itemId.msg)) {
+			scheduled.removeSending(item);
+		}
+		if (show) {
+			show->showToast(tr::lng_error_schedule_limit(tr::now));
+		}
 	}
 	if (const auto item = _session->data().message(itemId)) {
 		Assert(randomId != 0);
@@ -708,7 +726,9 @@ void ApiWrap::finalizeMessageDataRequest(
 
 QString ApiWrap::exportDirectMessageLink(
 		not_null<HistoryItem*> item,
-		bool inRepliesContext) {
+		bool inRepliesContext,
+		bool forceNonPublicLink,
+		std::optional<TimeId> videoTimestamp) {
 	Expects(item->history()->peer->isChannel());
 
 	const auto itemId = item->fullId();
@@ -731,7 +751,7 @@ QString ApiWrap::exportDirectMessageLink(
 				const auto sender = root
 					? root->discussionPostOriginalSender()
 					: nullptr;
-				if (sender && sender->hasUsername()) {
+				if (sender && sender->hasUsername() && !forceNonPublicLink) {
 					// Comment to a public channel.
 					const auto forwarded = root->Get<HistoryMessageForwarded>();
 					linkItemId = forwarded->savedFromMsgId;
@@ -747,7 +767,7 @@ QString ApiWrap::exportDirectMessageLink(
 				}
 			}
 		}
-		const auto base = linkChannel->hasUsername()
+		const auto base = (linkChannel->hasUsername() && !forceNonPublicLink)
 			? linkChannel->username()
 			: "c/" + QString::number(peerToChannel(linkChannel->id).bare);
 		const auto post = QString::number(linkItemId.bare);
@@ -760,20 +780,11 @@ QString ApiWrap::exportDirectMessageLink(
 				: linkThreadId
 				? (QString::number(linkThreadId.bare) + '/' + post)
 				: post);
-		if (linkChannel->hasUsername()
-			&& !linkChannel->isMegagroup()
-			&& !linkCommentId
-			&& !linkThreadId) {
-			if (const auto media = item->media()) {
-				if (const auto document = media->document()) {
-					if (document->isVideoMessage()) {
-						return u"https://telesco.pe/"_q + query;
-					}
-				}
-			}
-		}
 		return session().createInternalLinkFull(query);
 	};
+	if (forceNonPublicLink) {
+		return fallback();
+	}
 	const auto i = _unlikelyMessageLinks.find(itemId);
 	const auto current = (i != end(_unlikelyMessageLinks))
 		? i->second
@@ -790,7 +801,14 @@ QString ApiWrap::exportDirectMessageLink(
 			_unlikelyMessageLinks.emplace_or_assign(itemId, link);
 		}
 	}).send();
-	return current;
+	const auto addTimestamp = channel->hasUsername()
+		&& !inRepliesContext
+		&& videoTimestamp.has_value();
+	const auto addedSeparator = (current.indexOf('?') >= 0) ? '&' : '?';
+	const auto addedTimestamp = addTimestamp
+		? (addedSeparator + u"t="_q + FormatVideoTimestamp(*videoTimestamp))
+		: QString();
+	return current + addedTimestamp;
 }
 
 QString ApiWrap::exportDirectStoryLink(not_null<Data::Story*> story) {
@@ -1759,7 +1777,7 @@ void ApiWrap::joinChannel(not_null<ChannelData*> channel) {
 		_channelAmInRequests.emplace(channel, requestId);
 
 		using Flag = ChannelDataFlag;
-		chatParticipants().loadSimilarChannels(channel);
+		chatParticipants().loadSimilarPeers(channel);
 		channel->setFlags(channel->flags() | Flag::SimilarExpanded);
 	}
 }
@@ -3206,6 +3224,31 @@ void ApiWrap::sharedMediaDone(
 	}
 }
 
+mtpRequestId ApiWrap::requestGlobalMedia(
+		Storage::SharedMediaType type,
+		const QString &query,
+		int32 offsetRate,
+		Data::MessagePosition offsetPosition,
+		Fn<void(Api::GlobalMediaResult)> done) {
+	auto prepared = Api::PrepareGlobalMediaRequest(
+		_session,
+		offsetRate,
+		offsetPosition,
+		type,
+		query);
+	if (!prepared) {
+		done({});
+		return 0;
+	}
+	return request(
+		std::move(*prepared)
+	).done([=](const Api::SearchRequestResult &result) {
+		done(Api::ParseGlobalMediaResult(_session, result));
+	}).fail([=] {
+		done({});
+	}).send();
+}
+
 void ApiWrap::sendAction(const SendAction &action) {
 	if (!action.options.scheduled
 		&& !action.options.shortcutId
@@ -3229,13 +3272,13 @@ void ApiWrap::finishForwarding(const SendAction &action) {
 	const auto topicRootId = action.replyTo.topicRootId;
 	auto toForward = history->resolveForwardDraft(topicRootId);
 	if (!toForward.items.empty()) {
-		const auto error = GetErrorTextForSending(
+		const auto error = GetErrorForSending(
 			history->peer,
 			{
 				.topicRootId = topicRootId,
 				.forward = &toForward.items,
 			});
-		if (!error.isEmpty()) {
+		if (error) {
 			return;
 		}
 
@@ -3329,6 +3372,7 @@ void ApiWrap::forwardMessages(
 		}
 		const auto requestType = Data::Histories::RequestType::Send;
 		const auto idsCopy = localIds;
+		const auto scheduled = action.options.scheduled;
 		histories.sendRequest(history, requestType, [=](Fn<void()> finish) {
 			history->sendRequestId = request(MTPmessages_ForwardMessages(
 				MTP_flags(sendFlags),
@@ -3339,8 +3383,12 @@ void ApiWrap::forwardMessages(
 				MTP_int(topMsgId),
 				MTP_int(action.options.scheduled),
 				(sendAs ? sendAs->input : MTP_inputPeerEmpty()),
-				Data::ShortcutIdToMTP(_session, action.options.shortcutId)
+				Data::ShortcutIdToMTP(_session, action.options.shortcutId),
+				MTPint() // video_timestamp
 			)).done([=](const MTPUpdates &result) {
+				if (!scheduled) {
+					this->updates().checkForSentToScheduled(result);
+				}
 				applyUpdates(result);
 				if (shared && !--shared->requestsLeft) {
 					shared->callback();
@@ -3502,6 +3550,7 @@ void ApiWrap::sendVoiceMessage(
 		QByteArray result,
 		VoiceWaveform waveform,
 		crl::time duration,
+		bool video,
 		const SendAction &action) {
 	const auto caption = TextWithTags();
 	const auto to = FileLoadTaskOptions(action);
@@ -3510,6 +3559,7 @@ void ApiWrap::sendVoiceMessage(
 		result,
 		duration,
 		waveform,
+		video,
 		to,
 		caption));
 }
@@ -3528,6 +3578,18 @@ void ApiWrap::editMedia(
 		file.path,
 		file.content,
 		std::move(file.information),
+		(file.videoCover
+			? std::make_unique<FileLoadTask>(
+				&session(),
+				file.videoCover->path,
+				file.videoCover->content,
+				std::move(file.videoCover->information),
+				nullptr,
+				SendMediaType::Photo,
+				to,
+				TextWithTags(),
+				false)
+			: nullptr),
 		type,
 		to,
 		caption,
@@ -3569,6 +3631,19 @@ void ApiWrap::sendFiles(
 			file.path,
 			file.content,
 			std::move(file.information),
+			(file.videoCover
+				? std::make_unique<FileLoadTask>(
+					&session(),
+					file.videoCover->path,
+					file.videoCover->content,
+					std::move(file.videoCover->information),
+					nullptr,
+					SendMediaType::Photo,
+					to,
+					TextWithTags(),
+					false,
+					nullptr)
+				: nullptr),
 			uploadWithType,
 			to,
 			caption,
@@ -3594,11 +3669,13 @@ void ApiWrap::sendFile(
 	auto caption = TextWithTags();
 	const auto spoiler = false;
 	const auto information = nullptr;
+	const auto videoCover = nullptr;
 	_fileLoader->addTask(std::make_unique<FileLoadTask>(
 		&session(),
 		QString(),
 		fileContent,
 		information,
+		videoCover,
 		type,
 		to,
 		caption,
@@ -3936,7 +4013,8 @@ void ApiWrap::sendInlineResult(
 		not_null<UserData*> bot,
 		not_null<InlineBots::Result*> data,
 		const SendAction &action,
-		std::optional<MsgId> localMessageId) {
+		std::optional<MsgId> localMessageId,
+		Fn<void(bool)> done) {
 	sendAction(action);
 
 	const auto history = action.history;
@@ -4016,11 +4094,17 @@ void ApiWrap::sendInlineResult(
 		history->finishSavingCloudDraft(
 			topicRootId,
 			UnixtimeFromMsgId(response.outerMsgId));
+		if (done) {
+			done(true);
+		}
 	}, [=](const MTP::Error &error, const MTP::Response &response) {
 		sendMessageFail(error, peer, randomId, newId);
 		history->finishSavingCloudDraft(
 			topicRootId,
 			UnixtimeFromMsgId(response.outerMsgId));
+		if (done) {
+			done(false);
+		}
 	});
 	finishForwarding(action);
 }
@@ -4085,16 +4169,29 @@ void ApiWrap::uploadAlbumMedia(
 				return;
 			}
 			const auto &fields = document->c_document();
+			const auto mtpCover = data.vvideo_cover();
+			const auto cover = (mtpCover && mtpCover->type() == mtpc_photo)
+				? &(mtpCover->c_photo())
+				: (const MTPDphoto*)nullptr;
 			using Flag = MTPDinputMediaDocument::Flag;
 			const auto flags = Flag()
 				| (data.vttl_seconds() ? Flag::f_ttl_seconds : Flag())
-				| (spoiler ? Flag::f_spoiler : Flag());
+				| (spoiler ? Flag::f_spoiler : Flag())
+				| (data.vvideo_timestamp() ? Flag::f_video_timestamp : Flag())
+				| (cover ? Flag::f_video_cover : Flag());
 			const auto media = MTP_inputMediaDocument(
 				MTP_flags(flags),
 				MTP_inputDocument(
 					fields.vid(),
 					fields.vaccess_hash(),
 					fields.vfile_reference()),
+				(cover
+					? MTP_inputPhoto(
+						cover->vid(),
+						cover->vaccess_hash(),
+						cover->vfile_reference())
+					: MTPInputPhoto()),
+				MTP_int(data.vvideo_timestamp().value_or_empty()),
 				MTP_int(data.vttl_seconds().value_or_empty()),
 				MTPstring()); // query
 			sendAlbumWithUploaded(item, groupId, media);
@@ -4225,6 +4322,7 @@ void ApiWrap::sendMultiPaidMedia(
 	auto &histories = history->owner().histories();
 	const auto peer = history->peer;
 	const auto itemId = item->fullId();
+	album->sent = true;
 	histories.sendPreparedMessage(
 		history,
 		replyTo,
@@ -4296,6 +4394,9 @@ void ApiWrap::sendAlbumWithCancelled(
 }
 
 void ApiWrap::sendAlbumIfReady(not_null<SendingAlbum*> album) {
+	if (album->sent) {
+		return;
+	}
 	const auto groupId = album->groupId;
 	if (album->items.empty()) {
 		_sendingAlbums.remove(groupId);
@@ -4320,6 +4421,7 @@ void ApiWrap::sendAlbumIfReady(not_null<SendingAlbum*> album) {
 		return;
 	} else if (medias.size() < 2) {
 		const auto &single = medias.front().data();
+		album->sent = true;
 		sendMediaWithRandomId(
 			sample,
 			single.vmedia(),
@@ -4346,6 +4448,7 @@ void ApiWrap::sendAlbumIfReady(not_null<SendingAlbum*> album) {
 		| (album->options.invertCaption ? Flag::f_invert_media : Flag(0));
 	auto &histories = history->owner().histories();
 	const auto peer = history->peer;
+	album->sent = true;
 	histories.sendPreparedMessage(
 		history,
 		replyTo,
